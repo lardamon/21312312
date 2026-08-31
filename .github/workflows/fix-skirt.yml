@@ -1,0 +1,105 @@
+name: Build fixed skirt JSON
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fix-skirt.yml'
+      - 'SOURCE.json'
+      - 'TARGET.json'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Transfer only skirt bone timelines
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import copy
+          import json
+          from pathlib import Path
+
+          source_path = Path('SOURCE.json')
+          target_path = Path('TARGET.json')
+          output_path = Path('TARGET_FIXED_SKIRT.json')
+          report_path = Path('TRANSFER_REPORT.txt')
+
+          skirt_bones = [
+              'skirt_C_1', 'skirt_C_2', 'skirt_C_3',
+              'skirt_L_1', 'skirt_L_2', 'skirt_L_3',
+              'skirt_R_1', 'skirt_R_2', 'skirt_R_3',
+          ]
+
+          source = json.loads(source_path.read_text(encoding='utf-8-sig'))
+          target = json.loads(target_path.read_text(encoding='utf-8-sig'))
+          result = copy.deepcopy(target)
+
+          source_anims = source.get('animations', {})
+          target_anims = target.get('animations', {})
+          result_anims = result.setdefault('animations', {})
+          transferred = []
+
+          for anim_name, tgt_anim in target_anims.items():
+              src_anim = source_anims.get(anim_name)
+              if not isinstance(src_anim, dict):
+                  continue
+              src_bones = src_anim.get('bones')
+              if not isinstance(src_bones, dict):
+                  continue
+
+              res_anim = result_anims[anim_name]
+              res_bones = res_anim.get('bones')
+              for bone in skirt_bones:
+                  if bone not in src_bones:
+                      continue
+                  if res_bones is None:
+                      res_bones = {}
+                      res_anim['bones'] = res_bones
+                  res_bones[bone] = copy.deepcopy(src_bones[bone])
+                  kinds = list(src_bones[bone].keys()) if isinstance(src_bones[bone], dict) else []
+                  transferred.append((anim_name, bone, kinds))
+
+          def masked(obj):
+              x = copy.deepcopy(obj)
+              anims = x.get('animations', {})
+              if isinstance(anims, dict):
+                  for anim in anims.values():
+                      if not isinstance(anim, dict):
+                          continue
+                      bones = anim.get('bones')
+                      if isinstance(bones, dict):
+                          for bone in skirt_bones:
+                              bones.pop(bone, None)
+              return x
+
+          assert set(result.get('animations', {}).keys()) == set(target.get('animations', {}).keys())
+          assert masked(result) == masked(target), 'Data outside allowed skirt timelines changed'
+          for anim_name, bone, _ in transferred:
+              assert result['animations'][anim_name]['bones'][bone] == source['animations'][anim_name]['bones'][bone]
+          for key in target:
+              if key != 'animations':
+                  assert result[key] == target[key], f'Top-level section changed: {key}'
+
+          output_path.write_text(json.dumps(result, ensure_ascii=False, indent='\t') + '\n', encoding='utf-8')
+          reread = json.loads(output_path.read_text(encoding='utf-8'))
+          assert reread == result
+          assert masked(reread) == masked(target)
+
+          lines = [f'{anim}: {bone} ({", ".join(kinds) if kinds else "timeline"})' for anim, bone, kinds in transferred]
+          report_path.write_text('\n'.join(lines) + ('\n' if lines else ''), encoding='utf-8')
+          print(f'Transferred {len(transferred)} skirt bone timeline entries')
+          print('VALIDATION PASS')
+          PY
+      - name: Upload fixed JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: target-fixed-skirt
+          path: |
+            TARGET_FIXED_SKIRT.json
+            TRANSFER_REPORT.txt
+          if-no-files-found: error
+          retention-days: 1
